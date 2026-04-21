@@ -1,18 +1,20 @@
 runtime: custom
 env: flex
-service: flex-node-service-otel
+#service: flex-node-service-otel
 
 automatic_scaling:
   min_num_instances: 1
   max_num_instances: 2
 
 env_variables:
-  DD_API_KEY: "your_api_key_here"
+  DD_API_KEY: "<Your API key here>"
   DD_SITE: "datadoghq.com"
   DD_SERVICE: "flex-node-service-otel"
   DD_ENV: "dev"
+  OTEL_EXPORTER_OTLP_LOGS_PROTOCOL: "http/protobuf"
+  OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: "https://otlp.datadoghq.com/v1/logs"
   OTEL_EXPORTER_OTLP_TRACES_PROTOCOL: "http/protobuf"
-  OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: "your endpoint here"
+  OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: "<Your endpoint here>"
 
 handlers:
 - url: /static

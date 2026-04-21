@@ -1,6 +1,6 @@
 # Datadog on Google App Engine Flexible - Node.js (OpenTelemetry)
 
-A sample Express app demonstrating how to instrument a Node.js application on Google App Engine Flexible environment using OpenTelemetry, with APM tracing, log collection via Bunyan, and trace-log correlation sent directly to Datadog.
+A sample Express app demonstrating how to instrument a Node.js application on Google App Engine Flexible environment using OpenTelemetry, with APM tracing, log collection via Bunyan, trace-log correlation, and metrics sent directly to Datadog — no Datadog Agent required.
 
 ## Features
 
@@ -9,6 +9,7 @@ A sample Express app demonstrating how to instrument a Node.js application on Go
 - ✅ Custom metrics via OpenTelemetry SDK
 - ✅ Infrastructure metrics via GCP integration
 - ✅ Officially supported — no Datadog Agent required
+- ✅ No Dataflow, no Pub/Sub, no GCP log forwarding
 
 ## Prerequisites
 
@@ -36,8 +37,8 @@ A sample Express app demonstrating how to instrument a Node.js application on Go
 ### 1. Clone the repo
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/dd-gae-flex-node.git
-cd dd-gae-flex-node
+git clone https://github.com/mturolski/dd-gae-flex-otel.git
+cd dd-gae-flex-otel
 ```
 
 ### 2. Set your Datadog API key
@@ -60,7 +61,7 @@ gcloud app deploy
 ### 4. Verify the deployment
 
 ```bash
-gcloud app browse
+gcloud app browse -s flex-node-service-otel
 ```
 
 ## How It Works
@@ -68,13 +69,12 @@ gcloud app browse
 ### Architecture
 
 ```
-Node.js app (Express)
+Node.js app (Express + Bunyan)
        │
-       ├── Traces ──► OTel OTLP Exporter ──► https://gae.integrations.otlp.us5.datadoghq.com/v1/traces
-       ├── Logs ───► OTel OTLP Exporter ──► https://api.datadoghq.com/api/v2/otlp/v1/logs
-       └── Metrics ► OTel OTLP Exporter ──► https://api.datadoghq.com/api/v2/otlp/v1/metrics
+       ├── Traces ──► OTel OTLP Proto Exporter ──► https://<YOUR ENDPOINT HERE>.datadoghq.com/v1/traces
+       ├── Logs ───► OTel OTLP Proto Exporter ──► https://otlp.datadoghq.com/v1/logs
 
-GCP Integration ──────────────────────────► Datadog (infrastructure metrics)
+GCP Integration ──────────────────────────────────► Datadog (infrastructure metrics)
 ```
 
 ### tracing.js
@@ -82,8 +82,8 @@ GCP Integration ─────────────────────�
 Initializes the OpenTelemetry Node SDK before the app starts with three exporters:
 
 - **Traces** — sent to Datadog's GAE-specific OTel endpoint via HTTP/protobuf
-- **Logs** — sent to Datadog's standard OTel logs intake
-- **Metrics** — sent to Datadog's standard OTel metrics intake, exported every 60 seconds
+- **Logs** — sent to Datadog's standard OTel logs intake via HTTP/protobuf
+- **Metrics** — sent to Datadog's standard OTel metrics intake via HTTP/protobuf, exported every 60 seconds
 
 Auto-instrumentation via `@opentelemetry/auto-instrumentations-node` automatically traces HTTP requests, Express routes, and other supported libraries with no additional code.
 
@@ -91,19 +91,24 @@ Auto-instrumentation via `@opentelemetry/auto-instrumentations-node` automatical
 
 ### server.js
 
-The Express app manually creates spans for business logic and injects trace context into Bunyan log entries via the `getTraceContext()` helper. This enables trace-log correlation in Datadog — clicking a trace shows the correlated logs and vice versa.
+Uses Bunyan for structured logging with a custom `OTelStream` class that forwards every log record to the OTel logs exporter. This means:
 
-### Logging with Bunyan
+- Bunyan's API is unchanged — `logger.info()`, `logger.error()` etc. work as normal
+- Logs go to **stdout** (GCP Cloud Logging) and **Datadog** simultaneously
+- Every log entry automatically includes `dd.trace_id` and `dd.span_id` for trace-log correlation
 
-Bunyan writes logs to both:
-- **stdout** — picked up by GCP Cloud Logging
-- **/var/log/app/app.log** — for local file access if needed
+### Logging architecture
 
-Each log entry includes `dd.trace_id` and `dd.span_id` fields for correlation.
+```
+logger.info(...)
+       │
+       ├── stdout stream ──► GCP Cloud Logging
+       └── OTelStream ─────► OTel SDK ──► Datadog Logs
+```
 
 ### Dockerfile
 
-Significantly simpler than an agent-based approach — just a Node.js base image with dependencies installed. No Datadog Agent, no background processes, no fragile binary paths.
+Simple Node.js base image with no Datadog Agent — just the app and its dependencies.
 
 ## What You'll See in Datadog
 
@@ -112,47 +117,87 @@ Significantly simpler than an agent-based approach — just a Node.js base image
 | APM traces | APM → Traces, filter by `service:flex-node-service-otel` | OTel |
 | Logs | Logs, filter by `service:flex-node-service-otel` | OTel |
 | Trace-log correlation | Click a trace → Logs tab | OTel |
-| Custom metrics | Metrics Explorer | OTel |
 | Infrastructure (CPU, memory) | Infrastructure → Host Map | GCP integration |
 | GAE metrics (requests, latency) | Dashboards → GAE | GCP integration |
 
-## Diagnostic Endpoints
+## Observability Without Infrastructure View
 
-| Endpoint | Description |
-|---|---|
-| `/dd-status` | Shows running processes and DD env vars |
-| `/dd-trace-check` | Returns current trace/span IDs for the active request |
+When using direct OTel ingestion (no Datadog Agent), your service will **not** appear in the Datadog Infrastructure Host List. This is expected behaviour — the infrastructure view requires the Agent or host metadata sent via the Datadog Exporter.
+
+However, you still get comprehensive observability through:
+
+### APM Service Page
+Go to **APM → Services → flex-node-service-otel**. This gives you:
+- Request throughput, latency percentiles (p50, p75, p95, p99), and error rate
+- Endpoint-level breakdown showing performance per route
+- Deployment tracking across versions
+- Flame graphs and trace waterfall views for individual requests
+
+### Log Management
+Go to **Logs** and filter by `service:flex-node-service-otel`. You get:
+- All structured log entries with full attribute context
+- Trace-log correlation — click any log entry to jump to the correlated trace, or click a trace to see its logs
+- Log patterns and anomaly detection
+
+### Metrics Explorer
+Go to **Metrics → Explorer** and search for metrics prefixed with your service name. Custom metrics emitted via the OTel SDK appear here and can be used to build dashboards and monitors.
+
+### Dashboards
+You can build a complete service dashboard combining:
+- OTel APM metrics (`trace.*` namespace)
+- OTel custom metrics
+- GCP integration metrics (`gcp.appengine.*`) for infrastructure-level data like instance count, memory, and CPU — these flow via the GCP integration regardless of the Agent
+
+### Monitors and Alerts
+All of the above data sources can be used for monitors. For example:
+- Alert on p99 latency exceeding a threshold (APM metric)
+- Alert on error rate spike (APM metric)
+- Alert on log pattern matching an error keyword (Log monitor)
+
+### What You Won't See
+- **Infrastructure Host List** — requires Agent or host metadata
+- **Live Process monitoring** — requires Agent
+- **Network Performance Monitoring** — requires Agent
+- **AppSec / IAST** — requires Agent with ddtrace
+
+For a purely observability-focused setup (traces, logs, metrics), the OTel approach covers everything you need without the operational overhead of managing the Agent.
+
+
+
+## OTel Endpoint Requirements
+
+```
+OTEL_EXPORTER_OTLP_TRACES_PROTOCOL=http/protobuf
+OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=<Contact Support for this endpoint>
+
+OTEL_EXPORTER_OTLP_LOGS_PROTOCOL=http/protobuf
+OTEL_EXPORTER_OTLP_LOGS_ENDPOINT=https://otlp.datadoghq.com/v1/logs
+```
+
+Authentication is handled via the `dd-api-key` header, set dynamically from `DD_API_KEY` in `tracing.js`.
+
+> **Note:** The GAE-specific traces endpoint is currently in preview. The logs and metrics endpoints (`otlp.datadoghq.com`) are generally available.
+
+## Known Limitations
+
+- The GAE OTel traces endpoint is currently in **preview**
+- The log `source` tag defaults to `otlp_log_ingestion` — this can be overridden with a Datadog Log Pipeline remapper under **Logs → Pipelines**
+- The GAE-managed OpenTelemetry collector sidecar cannot be reconfigured to forward to Datadog — it is managed entirely by Google
+- Infrastructure Host List is not populated without the Datadog Agent
 
 ## Comparison vs Agent-based Approach
 
-| | Agent-based  | OTel-based (this example) |
+| | Agent-based (app engine example) | OTel-based (this example) |
 |---|---|---|
 | APM | ✅ | ✅ |
 | Logs | ✅ | ✅ |
 | Trace-log correlation | ✅ | ✅ |
 | Infrastructure metrics | ✅ | ✅ (via GCP integration) |
+| Infrastructure Host List | ✅ | ❌ |
 | AppSec / IAST | ✅ | ❌ |
 | SBOM / SCA | ✅ | ❌ |
 | Runtime security | ✅ | ❌ |
 | Officially supported | ❌ | ✅ |
 | Memory overhead | ~200MB | ~50MB |
-| Fragile binary paths | ❌ Yes | ✅ None |
 | Dockerfile complexity | High | Low |
-
-## OTel Endpoint Requirements
-
-This example uses Datadog's GAE-specific OTel endpoint (currently in preview):
-
-```
-OTEL_EXPORTER_OTLP_TRACES_PROTOCOL=http/protobuf
-OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=<Your endpoint>
-OTEL_EXPORTER_OTLP_TRACES_HEADERS=dd-api-key=${DD_API_KEY}
-```
-
-Authentication is handled via the `dd-api-key` header, set dynamically from the `DD_API_KEY` environment variable in `tracing.js`.
-
-## Known Limitations
-
-- The GAE OTel endpoint is currently in **preview** — not yet generally available
-- Security features (AppSec, IAST, SBOM) are not available without the Datadog Agent
-- The GAE-managed OpenTelemetry collector (`opentelemetry-collector` sidecar) cannot be configured to forward to Datadog — it is managed entirely by Google
+| Operational fragility | High | Low |
